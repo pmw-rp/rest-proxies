@@ -1,5 +1,9 @@
 # GCP Config
 
+variable "prefix" {
+  default = "rp-rest-neg"
+}
+
 variable "project_name" {
   default = "xxxxxx"
 }

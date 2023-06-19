@@ -1,23 +1,12 @@
-resource "random_uuid" "deployment" {}
-
-# Deployment Management Resources
-
-locals {
-  uuid          = random_uuid.deployment.result
-  deployment_id = random_uuid.deployment.result
-}
-
-# Health Check Resources
-
 resource "google_compute_health_check" "default" {
-  name = "tf-hc"
+  name = "${var.prefix}-health-check"
   tcp_health_check {
     port = 30082
   }
 }
 
 resource "google_compute_firewall" "default" {
-  name    = "tf-hc-fw-allow"
+  name    = "${var.prefix}-health-check-firewall-rule"
   network = var.rp-network
   allow {
     protocol = "all"
@@ -30,28 +19,24 @@ resource "google_compute_firewall" "default" {
   }
 }
 
-## HTTPS Proxy Load Balancer Resources
-
 resource "google_compute_global_address" "default" {
-  name = "tf-global-address"
+  name = "${var.prefix}-public-ip"
 }
 
 resource "google_compute_managed_ssl_certificate" "default" {
-  name = "test-cert"
-
+  name = "${var.prefix}-certificate"
   managed {
     domains = [var.iap-proxy-fqdn]
   }
 }
 
 resource "google_compute_backend_service" "default" {
-  name = "tf-backend-service"
+  name = "${var.prefix}-backend-service"
   protocol = "HTTPS"
   load_balancing_scheme = "EXTERNAL_MANAGED"
   session_affinity = "CLIENT_IP"
   locality_lb_policy = "MAGLEV"
   enable_cdn = false
-
   dynamic "backend" {
     for_each = var.network_endpoint_groups
     content {
@@ -60,7 +45,6 @@ resource "google_compute_backend_service" "default" {
       max_rate = 100
     }
   }
-
   log_config {
     enable = true
     sample_rate = 1
@@ -73,19 +57,19 @@ resource "google_compute_backend_service" "default" {
 }
 
 resource "google_compute_url_map" "default" {
-  name            = "tf-urlmap"
+  name            = "${var.prefix}-urlmap"
   description     = "a description"
   default_service = google_compute_backend_service.default.id
 }
 
 resource "google_compute_target_https_proxy" "default" {
-  name             = "tf-https-proxy"
+  name             = "${var.prefix}-https-proxy"
   ssl_certificates = [google_compute_managed_ssl_certificate.default.id]
   url_map          = google_compute_url_map.default.id
 }
 
 resource "google_compute_global_forwarding_rule" "default" {
-  name = "tf-global-forwarding-rule"
+  name = "${var.prefix}-global-forwarding-rule"
   target = google_compute_target_https_proxy.default.id
   ip_protocol = "TCP"
   port_range = "443"

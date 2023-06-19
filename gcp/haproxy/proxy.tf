@@ -1,42 +1,32 @@
-resource "random_uuid" "deployment" {}
-
-# Deployment Management Resources
-
-locals {
-  uuid          = random_uuid.deployment.result
-  deployment_id = random_uuid.deployment.result
-}
-
 resource "google_compute_network" "proxy-network" {
-  name = "tf-vpc-proxy-network"
+  name = "${var.prefix}-network"
   auto_create_subnetworks = false
 }
 
 resource "google_compute_subnetwork" "proxy-network-subnet" {
-  name = "tf-vpc-proxy-subnet"
+  name = "${var.prefix}-subnet"
   ip_cidr_range = var.proxy-vpc-cidr
   region = var.region
   network = google_compute_network.proxy-network.id
 }
 
-## Create Cloud Router
-
 resource "google_compute_router" "router" {
   project = var.project_name
-  name    = "tf-nat-router"
+  name    = "${var.prefix}-router"
   network = google_compute_network.proxy-network.id
   region  = var.region
 }
 
-## Create Nat Gateway
-
 resource "google_compute_router_nat" "nat" {
-  name                               = "tf-router-nat"
+  name                               = "${var.prefix}-router-nat"
   router                             = google_compute_router.router.name
   region                             = var.region
   nat_ip_allocate_option             = "AUTO_ONLY"
-  source_subnetwork_ip_ranges_to_nat = "ALL_SUBNETWORKS_ALL_IP_RANGES"
-
+  source_subnetwork_ip_ranges_to_nat = "LIST_OF_SUBNETWORKS"
+  subnetwork {
+    name                    = google_compute_subnetwork.proxy-network-subnet.self_link
+    source_ip_ranges_to_nat = ["ALL_IP_RANGES"]
+  }
   log_config {
     enable = true
     filter = "ERRORS_ONLY"
@@ -44,12 +34,11 @@ resource "google_compute_router_nat" "nat" {
 }
 
 resource "google_compute_global_address" "iap-public-ip" {
-  name = "tf-iap-public-ip"
+  name = "${var.prefix}-public-ip"
 }
 
 resource "google_compute_managed_ssl_certificate" "iap-proxy" {
-  name = "tf-iap-certificate"
-
+  name = "${var.prefix}-certificate"
   managed {
     domains = [var.iap-proxy-fqdn]
   }
@@ -58,16 +47,13 @@ resource "google_compute_managed_ssl_certificate" "iap-proxy" {
 resource "google_compute_instance" "haproxy" {
   machine_type = "n1-standard-1"
   count = var.proxy-count
-  name = "haproxy-${count.index}"
+  name = "${var.prefix}-vm-${count.index}"
   zone = "${var.region}-${var.availability_zones[count.index % length(var.availability_zones)]}"
-  hostname = "haproxy-${count.index}.nuln.net"
-
-    metadata = {
+  metadata = {
     ssh-keys = <<KEYS
 ${var.ssh_user}:${file(abspath(var.public_key_path))}
 KEYS
   }
-
   boot_disk {
     initialize_params {
       image = var.image
@@ -76,49 +62,46 @@ KEYS
   network_interface {
     subnetwork = google_compute_subnetwork.proxy-network-subnet.name
   }
-
   metadata_startup_script = templatefile("${path.module}/startup.tftpl", { pandaproxy = var.pandaproxy })
 }
 
 resource "google_compute_instance_group" "haproxies" {
-  name = "tf-haproxy-instance-group"
+  name = "${var.prefix}-instance-group-${var.region}-${var.availability_zones[count.index]}"
   count = length(var.availability_zones)
   zone = "${var.region}-${var.availability_zones[count.index]}"
   instances = tolist([for i in google_compute_instance.haproxy.* : i.self_link if i.zone == "${var.region}-${var.availability_zones[count.index]}"])
   named_port {
-    name = "https"  # Here
-    port = 443 # Here
+    name = "https"
+    port = 443
   }
 }
 
 resource "google_compute_network_peering" "peering1" {
-  name         = "tf-peering-1"
+  name         = "${var.prefix}-peering-inbound"
   network      = google_compute_network.proxy-network.self_link
   peer_network = var.rp-network
 }
 
 resource "google_compute_network_peering" "peering2" {
-  name         = "tf-peering-2"
+  name         = "${var.prefix}-peering-outbound"
   network      = var.rp-network
   peer_network = google_compute_network.proxy-network.self_link
 }
 
-# Health Check Resources
-
 resource "google_compute_health_check" "default" {
-  name = "tf-hap-hc"
+  name = "${var.prefix}-health-check"
   tcp_health_check {
-    port = 443 # Here
+    port = 443
   }
 }
 
 resource "google_compute_firewall" "default" {
-  name    = "tf-hap-hc-fw-allow2"
+  name    = "${var.prefix}-health-check-firewall-rule"
   network = google_compute_network.proxy-network.name
   allow {
     protocol = "all"
   }
-  source_ranges = ["130.211.0.0/22", "35.191.0.0/16"]
+  source_ranges = ["130.211.0.0/22", "35.191.0.0/16"] # These are the Google Health Check sources
   direction = "INGRESS"
   priority = 1
   log_config {
@@ -127,14 +110,13 @@ resource "google_compute_firewall" "default" {
 }
 
 resource "google_compute_backend_service" "default" {
-  name = "tf-hap-backend-service"
-  protocol = "HTTPS" # Here
+  name = "${var.prefix}-backend-service"
+  protocol = "HTTPS"
   load_balancing_scheme = "EXTERNAL_MANAGED"
   session_affinity = "CLIENT_IP"
   locality_lb_policy = "MAGLEV"
   enable_cdn = false
   port_name = "https"
-
   dynamic "backend" {
     for_each = google_compute_instance_group.haproxies
     content {
@@ -143,7 +125,6 @@ resource "google_compute_backend_service" "default" {
       max_rate       = 100
     }
   }
-
   log_config {
     enable = true
     sample_rate = 1
@@ -156,18 +137,18 @@ resource "google_compute_backend_service" "default" {
 }
 
 resource "google_compute_url_map" "default" {
-  name            = "tf-hap-urlmap"
+  name            = "${var.prefix}-urlmap"
   default_service = google_compute_backend_service.default.id
 }
 
 resource "google_compute_target_https_proxy" "default" {
-  name             = "tf-hap-https-proxy"
+  name             = "${var.prefix}-https-proxy"
   ssl_certificates = [google_compute_managed_ssl_certificate.iap-proxy.id]
   url_map          = google_compute_url_map.default.id
 }
 
 resource "google_compute_global_forwarding_rule" "default" {
-  name = "tf-hap-global-forwarding-rule"
+  name = "${var.prefix}-global-forwarding-rule"
   target = google_compute_target_https_proxy.default.id
   ip_protocol = "TCP"
   port_range = "443"
