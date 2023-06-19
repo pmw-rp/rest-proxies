@@ -1,0 +1,5 @@
+.idea/
+venv/
+terraform.*
+.terraform/
+.terraform.*
