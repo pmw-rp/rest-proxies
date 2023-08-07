@@ -1,0 +1,25 @@
+#!/bin/sh
+
+exec 3>&1 4>&2
+trap 'exec 2>&4 1>&3' 0 1 2 3
+exec 1> /tmp/startup.log 2>&1
+
+apt update
+apt install -y haproxy
+
+echo "
+
+frontend localhost
+    bind *:443
+    option tcplog
+    mode tcp
+    default_backend nodes
+
+backend nodes
+    mode tcp
+    balance roundrobin
+    server pandaproxy ${pandaproxy} check
+
+    " >> /etc/haproxy/haproxy.cfg
+
+systemctl restart haproxy
